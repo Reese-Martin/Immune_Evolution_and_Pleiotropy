@@ -17,7 +17,7 @@ using NaNStatistics
 
 #region Declare variables
 NumHostsCon = NumHostsUnc = 250 #declares number of unconstrained and constrained hosts. if these numbers differ the code breaks (as it is currently written)
-EqGens = 1 #number of generations the populations equilibrate for
+EqGens = 250 #number of generations the populations equilibrate for
 Runs = 100 #number of runs the sim goes through
 FixationGens = 1000
 
@@ -39,60 +39,54 @@ workDir = pwd() #gets current directory for saving
 function AcheiveEq(Net, Conc, StepLim, InfEq) #step by step calculates the system of DEs that control network interactions
     Equilib = false
     Step = 1
-    
+    UseCoef = .01 #amount of protein deactivated for simply interacting with other proteins
+    NumProts = length(Net[1,:])
+    tmpConc = zeros(StepLim+2,NumProts)
+    tmpConc[2,:] = Conc[end,:]
+    counter = 2
+    AllAct = Vector{Vector{Float64}}(undef,NumProts)
+    AllUse = Vector{Int64}(undef,NumProts)
+    for i in 1:NumProts
+        AllAct[i] = Net[:,i]
+        AllUse[i] = sum(Net[i,:].!= 0)
+    end
+    tmp = zeros(NumProts)
     while ~Equilib 
-    
-        tmpConcDelta = zeros(1,length(Net[1,:]))
-
-        for prot in 1:length(tmpConcDelta) #collect up and down regulating actions for each protein, sum them, and have that as the conDelta for each protein
-
-            InitProtConc = Conc[end,prot]
-            ActingProts = Net[:,prot]
-            UsedIn = sum(Net[prot,:].!= 0)
-
-            UpregCoefs = ActingProts[findall(ActingProts.>0)]
-            UpRegConc = Conc[end,findall(ActingProts.>0)]
-
-            DownProtConc = ActingProts[findall(ActingProts.<0)]
-            DownRegCoefs = Conc[end,findall(ActingProts.<0)]
-
-            tmpUp = UpregCoefs.*UpRegConc
-            tmpDown = DownRegCoefs.*DownProtConc
-
-            if isempty(tmpUp)
-                tmpUp = 0
+        for prot in 1:NumProts #collect up and down regulating actions for each protein, sum them, and have that as the conDelta for each protein
+            InitProtConc = tmpConc[counter,prot]
+            ActingProts = AllAct[prot]
+            UsedIn = AllUse[prot]
+            for j in 1:length(tmp)
+                tmp[j] = ActingProts[j]*tmpConc[counter,j]
             end
 
-            Inc = (1-InitProtConc)*sum(tmpUp)
-
-            if isempty(tmpDown)
-                tmpDown = 0
+            for i in 1:length(ActingProts)
+                 if ActingProts[i] > 0 
+                    tmp[i] = tmp[i]*(1-InitProtConc)
+                 elseif ActingProts[i] < 0
+                    tmp[i] = tmp[i]*(InitProtConc)
+                 end
             end
-
-            Dec = (InitProtConc)*sum(abs.(tmpDown))
-
-            tmpConcDelta[prot] = Inc - Dec - (UseCoef*UsedIn)
-
+            tmpConc[counter+1,prot] = tmpConc[counter,prot] + (sum(tmp) - (UseCoef*UsedIn))
         end
-        Conc = vcat(Conc,Conc[[end],:]+tmpConcDelta)
-
-        if any(Conc[[end],:].>1) #keeps concentration <= 1
-            Conc[[end],findall(>(1),Conc[end,:])].=1
-        end
-        if any(Conc[[end],:].<1e-2) #keeps concentration >=0
-            Conc[[end],findall(<(1e-2),Conc[end,:])].=0
+        for j in 1:NumProts
+            if tmpConc[counter+1,j] > 1
+                tmpConc[counter+1,j] = 1
+            elseif tmpConc[counter+1,j] < 0
+                tmpConc[counter+1,j] = 0
+            end
         end
 
         Step += 1
 
         if InfEq #escape functions differently in infected cases, need to go a set number of steps with the parasite
-            if Conc[end,end] <= 1e-2
+            if tmpConc[counter+1,end] <= 1e-2
                 Equilib = true
             elseif Step == StepLim
                 Equilib = true
             end
         else
-            tmpDif = Conc[[end],[end]]-Conc[[end-1],[end]]
+            tmpDif = tmpConc[counter+1,[end]]-tmpConc[counter,[end]]
             if abs(tmpDif[1])<1e-2
                 Equilib = true
             end
@@ -101,8 +95,9 @@ function AcheiveEq(Net, Conc, StepLim, InfEq) #step by step calculates the syste
                 Equilib = true
             end
         end
+        counter += 1
     end 
-    return Conc
+    return tmpConc[1:counter,:]
 end
 function DetImmRes(ImmMag, Run, gen, Hosts)
     tmpImmRes = zeros(Hosts)
@@ -168,146 +163,147 @@ function InfectHosts(ParNetworks, HostNetworks, InfHosts)
 
     end
 end
-function OrgEvolution(HostNetworks,HostCons, ToRep)
+function OrgEvolution(HostNetworks, HostCons, HostFit, ToRep, NumHosts)
     NewOrgs = []
     NewCons = []
-    for Surv in 1:ToRep #run through survivors and potentially mutate
+    while length(NewOrgs) < ToRep#run through survivors and potentially mutate
         RepHost = rand(1:length(HostNetworks))
-        Dupe = copy(HostNetworks[RepHost])
-        ToMute = rand()
-        HostCon = HostCons[RepHost]
-        if ToMute < 5e-3 #if the mut threshold is passed, go on to mutations
-            Mutation = rand()
+        RepChance = count(x->x <= HostFit[RepHost],HostFit)/NumHosts
+        RepCheck = rand()
+        if (RepChance > RepCheck) 
+            Dupe = copy(HostNetworks[RepHost])
+            ToMute = rand()
+            HostCon = HostCons[RepHost]
+            if ToMute < 5e-3 #if the mut threshold is passed, go on to mutations
+                Mutation = rand()
+                if Mutation <= .25 #add edge to graph Lineage code: 1
+                    #print(' ', 1)
+                    if HostCon
+                        len = length(Dupe[1,:])
+                        Zers = findall(x->x==0,Dupe)
+                        deleteat!(Zers,findall(x->x == CartesianIndex(1,1), Zers)[1])
+                        deleteat!(Zers,findall(x->x == CartesianIndex(1,len), Zers)[1])
+                        deleteat!(Zers,findall(x->x == CartesianIndex(len,1), Zers)[1])
+                        deleteat!(Zers,findall(x->x == CartesianIndex(len,len), Zers)[1])
+                        
+                        Count = 1
+                        store = []
+                        for X in Zers
+                            if X[1] == 2
+                                push!(store,Count)
+                            end
+                            Count +=1
+                        end
 
-            if Mutation <= .25 #add edge to graph Lineage code: 1
-                #print(' ', 1)
-                if HostCon
-                    len = length(Dupe[1,:])
-                    Zers = findall(x->x==0,Dupe)
-                    deleteat!(Zers,findall(x->x == CartesianIndex(1,1), Zers)[1])
-                    deleteat!(Zers,findall(x->x == CartesianIndex(1,len), Zers)[1])
-                    deleteat!(Zers,findall(x->x == CartesianIndex(len,1), Zers)[1])
-                    deleteat!(Zers,findall(x->x == CartesianIndex(len,len), Zers)[1])
+                        reverse!(store)
+                        for X in store
+                            deleteat!(Zers,X)
+                        end                
+                    else            
+                        len = length(Dupe[1,:])
+                        Zers = findall(x->x==0,Dupe)
+
+                        deleteat!(Zers,findall(x->x == CartesianIndex(1,1), Zers)[1])
+                        deleteat!(Zers,findall(x->x == CartesianIndex(1,len), Zers)[1])
+                        deleteat!(Zers,findall(x->x == CartesianIndex(len,1), Zers)[1])
+                        deleteat!(Zers,findall(x->x == CartesianIndex(len,len), Zers)[1])
+                    end
+
+                    if length(Zers) >0
+                        AddEdge = Zers[rand(1:length(Zers))]
+                        Dupe[AddEdge[1],AddEdge[2]] = rand()*2-1
+                    end
                     
-                    Count = 1
-                    store = []
-                    for X in Zers
-                        if X[1] == 2
-                            push!(store,Count)
-                        end
-                        Count +=1
-                    end
-
-                    reverse!(store)
-                    for X in store
-                        deleteat!(Zers,X)
-                    end                
-                else            
-                    len = length(Dupe[1,:])
-                    Zers = findall(x->x==0,Dupe)
-
-                    deleteat!(Zers,findall(x->x == CartesianIndex(1,1), Zers)[1])
-                    deleteat!(Zers,findall(x->x == CartesianIndex(1,len), Zers)[1])
-                    deleteat!(Zers,findall(x->x == CartesianIndex(len,1), Zers)[1])
-                    deleteat!(Zers,findall(x->x == CartesianIndex(len,len), Zers)[1])
-                end
-
-                if length(Zers) >0
-                    AddEdge = Zers[rand(1:length(Zers))]
-                    Dupe[AddEdge[1],AddEdge[2]] = rand()
-                end
-                
-            elseif (Mutation > .25) & (Mutation <= .5) #delete edge from graph
-                
-                #print(' ', 2)
-                if HostCon
-                    Ones = findall(x -> x!=0,Dupe)
+                elseif (Mutation > .25) & (Mutation <= .5) #delete edge from graph
                     
-                    Count = 1
-                    store = []
-                    for X in Ones
-                        if X[1] == 2
-                            push!(store,Count)
+                    #print(' ', 2)
+                    if HostCon
+                        Ones = findall(x -> x!=0,Dupe)
+                        
+                        Count = 1
+                        store = []
+                        for X in Ones
+                            if X[1] == 2
+                                push!(store,Count)
+                            end
+                            Count +=1
                         end
-                        Count +=1
-                    end
-                    reverse!(store)
-                    for X in store
-                        deleteat!(Ones,X)
-                    end
-                else
-                    Ones = findall(x -> x!=0,Dupe)
-                end
-
-                if length(Ones) >1
-                    DelEdge = Ones[rand(1:length(Ones))]
-                    Dupe[DelEdge[1],DelEdge[2]] = 0
-                end 
-            elseif (Mutation > .5) & (Mutation <= .8) #change coefficient by 10% randomly up or down
-               # print(' ', 3)
-                if HostCon
-                    Coefs = findall(x -> x!=0, Dupe)
-                    Count = 1
-                    store = []
-                    for X in Coefs
-                        if X[1] == 2
-                            push!(store,Count)
+                        reverse!(store)
+                        for X in store
+                            deleteat!(Ones,X)
                         end
-                        Count +=1
-                    end
-                    reverse!(store)
-                    for X in store
-                        deleteat!(Coefs,X)
-                    end
-                else
-                    Coefs = findall(x -> x!=0,Dupe)
-                end
-                
-                if length(Coefs) > 0
-                    ChanCoef = Coefs[rand(1:length(Coefs))]
-                    delta = Dupe[ChanCoef[1],ChanCoef[2]]*.1
-                    tmp = rand()
-                    if tmp > .5
-                        Dupe[ChanCoef[1],ChanCoef[2]] = Dupe[ChanCoef[1],ChanCoef[2]]+delta
                     else
-                        Dupe[ChanCoef[1],ChanCoef[2]] = Dupe[ChanCoef[1],ChanCoef[2]]-delta
+                        Ones = findall(x -> x!=0,Dupe)
                     end
-                    if Dupe[ChanCoef[1],ChanCoef[2]] > 1
-                        Dupe[ChanCoef[1],ChanCoef[2]] = 1
-                    elseif Dupe[ChanCoef[1],ChanCoef[2]] < -1
-                        Dupe[ChanCoef[1],ChanCoef[2]] = -1
+
+                    if length(Ones) >1
+                        DelEdge = Ones[rand(1:length(Ones))]
+                        Dupe[DelEdge[1],DelEdge[2]] = 0
+                    end 
+                elseif (Mutation > .5) & (Mutation <= .8) #change coefficient by 10% randomly up or down
+                    if HostCon
+                        Coefs = findall(x -> x!=0, Dupe)
+                        Count = 1
+                        store = []
+                        for X in Coefs
+                            if X[1] == 2
+                                push!(store,Count)
+                            end
+                            Count +=1
+                        end
+                        reverse!(store)
+                        for X in store
+                            deleteat!(Coefs,X)
+                        end
+                    else
+                        Coefs = findall(x -> x!=0,Dupe)
                     end
+                    
+                    if length(Coefs) > 0
+                        ChanCoef = Coefs[rand(1:length(Coefs))]
+                        delta = Dupe[ChanCoef[1],ChanCoef[2]]*.1
+                        tmp = rand()
+                        if tmp > .5
+                            Dupe[ChanCoef[1],ChanCoef[2]] = Dupe[ChanCoef[1],ChanCoef[2]]+delta
+                        else
+                            Dupe[ChanCoef[1],ChanCoef[2]] = Dupe[ChanCoef[1],ChanCoef[2]]-delta
+                        end
+                        if Dupe[ChanCoef[1],ChanCoef[2]] > 1
+                            Dupe[ChanCoef[1],ChanCoef[2]] = 1
+                        elseif Dupe[ChanCoef[1],ChanCoef[2]] < -1
+                            Dupe[ChanCoef[1],ChanCoef[2]] = -1
+                        end
+                    end
+                elseif (Mutation >.8) & (Mutation <= .9) #delete a protein from the network
+                    if HostCon 
+                        if length(Dupe[1,:]) > 3
+                            ToDel = rand(2:length(Dupe[1,:])-1)
+                        else 
+                            ToDel = NaN
+                        end
+                    else
+                        if length(Dupe[1,:]) > 3
+                            ToDel = rand(3:length(Dupe[1,:])-1)
+                        else 
+                            ToDel = NaN
+                        end
+                    end
+                    
+                    if ~isnan(ToDel)
+                        Dupe = Dupe[1:end .!= ToDel,1:end .!= ToDel ]
+                    end
+                else #duplicate a protein in the network
+                    toDup = rand(2:length(Dupe[1,:])-1)
+                    tmpRow = Dupe[toDup,:]
+                    tmpRowStack = vcat(Dupe[1:toDup-1,:],tmpRow',Dupe[toDup:end,:])
+                    tmpCol = tmpRowStack[:,toDup]
+                    tmpColStack = hcat(tmpRowStack[:,1:toDup-1],tmpCol,tmpRowStack[:,toDup:end])
+                    Dupe = tmpColStack
                 end
-            elseif (Mutation >.8) & (Mutation <= .9) #delete a protein from the network
-                #print(' ', 4)
-                if HostCon 
-                    if length(Dupe[1,:]) > 3
-                        ToDel = rand(2:length(Dupe[1,:])-1)
-                    else 
-                        ToDel = NaN
-                    end
-                else
-                    if length(Dupe[1,:]) > 3
-                        ToDel = rand(3:length(Dupe[1,:])-1)
-                    else 
-                        ToDel = NaN
-                    end
-                end
-                
-                if ~isnan(ToDel)
-                    Dupe = Dupe[1:end .!= ToDel,1:end .!= ToDel ]
-                end
-            else #duplicate a protein in the network
-                toDup = rand(2:length(Dupe[1,:])-1)
-                tmpRow = Dupe[toDup,:]
-                tmpRowStack = vcat(Dupe[1:toDup-1,:],tmpRow',Dupe[toDup:end,:])
-                tmpCol = tmpRowStack[:,toDup]
-                tmpColStack = hcat(tmpRowStack[:,1:toDup-1],tmpCol,tmpRowStack[:,toDup:end])
-                Dupe = tmpColStack
             end
+            push!(NewOrgs,Dupe)
+            push!(NewCons, HostCon)
         end
-        push!(NewOrgs,Dupe)
-        push!(NewCons, HostCon)
     end
     for k in NewOrgs
         push!(HostNetworks,k)
@@ -375,7 +371,6 @@ end
 #endregion
 for inf in InfRatio
     #collection of arrays for the saving of data
-
     PopulationDistribution = zeros(Int64, Runs, FixationGens, 2)
     WinningNets = [] 
     WNInfRun = zeros(Float64,Runs,3) #Inf%, Run, constrained/unconstrained (1 = constrained)
@@ -419,13 +414,7 @@ for inf in InfRatio
              
         ConHostNetworks = deepcopy(UncHostNetworks)
         for i in 1:NumHostsCon
-
-            # tmp = rand(0:1,(5,5))
-            # tmp[[1,5,21,25]].= 0
-            # tmp1 = (rand(Float64,(5,5))*2).-1
-            # tmpNet = tmp.*tmp1
-             tmpInitConc = StartConc
-            # push!(ConHostNetworks,tmpNet)
+            tmpInitConc = StartConc
             push!(ConHostConcs,tmpInitConc)
             push!(ConHostCons,true)
 
@@ -457,10 +446,10 @@ for inf in InfRatio
 
             #region Phase One: Hosts Acheive pre-infection Equilib
             for i in 1:NumHostsUnc
-                UncHostConcs[i] = AcheiveEq(UncHostNetworks[i], UncHostConcs[i], 200, false)
+                UncHostConcs[i] = AcheiveEq(UncHostNetworks[i], UncHostConcs[i], 20, false)
             end
             for i in 1:NumHostsCon
-                ConHostConcs[i] = AcheiveEq(ConHostNetworks[i], ConHostConcs[i], 200, false)
+                ConHostConcs[i] = AcheiveEq(ConHostNetworks[i], ConHostConcs[i], 20, false)
             end     
             #endregion
             #region Phase Two: Infect Hosts
@@ -623,15 +612,17 @@ for inf in InfRatio
             UncParNetworks = UncParNetworks[p]
             UncProgNum = UncProgNum[p]
             UncParNetworks = UncParNetworks[1:NumPars - Int64(round(NumPars*DeathCoef))]
-            
+            UncDeath = NumHostsUnc - length(UncHostNetworks)
+
             p = sortperm(vec(UncParFit), rev = true)
             ConParNetworks = ConParNetworks[p]
             ConProgNum = ConProgNum[p]
             ConParNetworks = ConParNetworks[1:NumPars - Int64(round(NumPars*DeathCoef))]   
+            ConDeath = NumHostsCon - length(ConHostNetworks)
             #endregion
             #region Phase Seven: repopulate Hosts and parasitse allowing for evolution
-            OrgEvolution(UncHostNetworks, UncHostCons, NumHostsUnc*DeathCoef);
-            OrgEvolution(ConHostNetworks, ConHostCons, NumHostsCon*DeathCoef);
+            OrgEvolution(UncHostNetworks, UncHostCons, UncHostFit, UncDeath, NumHostsUnc);
+            OrgEvolution(ConHostNetworks, ConHostCons, ConHostFit, ConDeath, NumHostsCon);
             UncMeanSigs = floor(Statistics.mean([length(x[1,:]) for x in UncHostNetworks]))-2;
             ConMeanSigs = floor(Statistics.mean([length(x[1,:]) for x in ConHostNetworks]))-2;
             ParEvolution(UncParNetworks, UncProgNum, NumPars*DeathCoef, Int64(UncMeanSigs));
@@ -655,9 +646,6 @@ for inf in InfRatio
             UncParNetworks = UncParNetworks[UncParShuffle];
             ConParShuffle = Random.randperm(NumPars);
             ConParNetworks = ConParNetworks[ConParShuffle];
-            # if gen%50 == 0
-            #     print('\n',Run, ' ', gen,' ',(Dates.Time(Dates.now()) - Start_Time)/Nanosecond(1)* (1/1000000000))
-            # end
             
             gen = gen+1;
             #endregion
@@ -696,7 +684,6 @@ for inf in InfRatio
             if in(true, keys(PopDist)) & in(false, keys(PopDist))
                 PopulationDistribution[Run,CompGen,1] = PopDist[true] #constrained population
                 PopulationDistribution[Run,CompGen,2] = PopDist[false] #unconstrained population 
-
                 conHosts = findall(x -> x == true, HostCons)
                 UnqConNetCM = countmap(HostNetworks[conHosts])
                 UnqConNets = collect(keys(UnqConNetCM))
@@ -717,14 +704,14 @@ for inf in InfRatio
                     push!(LastLoser,MostCommonunConNet)
                 else
                     PopulationDistribution[Run,CompGen,2] = PopDist[false]
-                    WNInfRun[Run,:] = [inf,Run,0] #0 indicates winner was constrained
+                    WNInfRun[Run,:] = [inf,Run,0] #0 indicates winner was unconstrained
                     LLInfRun[Run,:] = [inf,Run,1] 
                     push!(LastLoser,MostCommonConNet)
                     push!(WinningNets,MostCommonunConNet)
                 end
                 Fixed = true
             end
-            if CompGen == FixationGens
+            if CompGen == FixationGens 
                 Fixed = true
                 PopulationDistribution[Run,CompGen,1] = PopDist[true]
                 PopulationDistribution[Run,CompGen,2] = PopDist[false] 
@@ -827,10 +814,11 @@ for inf in InfRatio
             p = sortperm(vec(tmpParFit), rev = true)
             ParNetworks = ParNetworks[p]
             ProgNum = ProgNum[p]
-            ParNetworks = ParNetworks[1:NumPars - Int64(round(NumPars*DeathCoef))]          
+            ParNetworks = ParNetworks[1:NumPars - Int64(round(NumPars*DeathCoef))]      
+            DeadHosts = NumHosts-length(HostNetworks)    
             #endregion
             #region Phase Seven: repopulate Hosts and parasitse allowing for evolution
-            OrgEvolution(HostNetworks, HostCons, NumHosts*DeathCoef)
+            OrgEvolution(HostNetworks, HostCons, HostFit, DeadHosts,NumHosts)
             MeanSigs = floor(Statistics.mean([length(x[1,:]) for x in HostNetworks]))-2
             ParEvolution(ParNetworks, ProgNum, NumPars*DeathCoef, Int64(MeanSigs))
             
@@ -852,7 +840,7 @@ for inf in InfRatio
         Run += 1 
     end
 
-    FileName = string(workDir,"/Data/Competition/FixedRand/",string(inf*100)[1:end-2],"_PercentInf","_",EqGens,"_EqGens_Fixed_Random_competition.jld2")
+    FileName = string(workDir,"/Data/Competition/FixedRand/",string(inf*100)[1:end-2],"_PercentInf","_",EqGens,"_EqGens_Fixed_Random_competition_Schrom_Selection_Martin_Deaths.jld2")
 
     FileIO.save(FileName,"PopulationDistribution",PopulationDistribution)
     FileIO.save(string(FileName[1:end-5],"_Networks.jld2"),"WinNets",WinningNets,"LastLoser",LastLoser,"WinInfRun",WNInfRun,"LoseInfRun",LLInfRun)
